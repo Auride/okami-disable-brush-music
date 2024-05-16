@@ -89,34 +89,6 @@ DWORD64 FindModuleBase(DWORD ProcessId, LPCSTR ModuleName)
 	return base;
 }
 
-DWORD InjectDllIntoProcess(DWORD ProcessId, LPCSTR DllFilePath)
-{
-	HANDLE process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, ProcessId);
-
-	LPVOID dllPathAddr = VirtualAllocEx(process, NULL, MAX_PATH, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-
-	WriteProcessMemory(process, dllPathAddr, DllFilePath, strlen(DllFilePath), NULL);
-
-	HMODULE kernel32Mod = GetModuleHandleA("Kernel32");
-	LPVOID loadLibProc = GetProcAddress(kernel32Mod, "LoadLibraryA");
-
-	HANDLE thread = CreateRemoteThread(process, NULL, 0, (LPTHREAD_START_ROUTINE)loadLibProc, dllPathAddr, 0, NULL);
-
-	WaitForSingleObject(thread, INFINITE);
-
-	DWORD exitCode;
-
-	GetExitCodeThread(thread, &exitCode);
-
-	CloseHandle(thread);
-
-	VirtualFreeEx(process, dllPathAddr, 0, MEM_RELEASE);
-
-	CloseHandle(process);
-
-	return exitCode;
-}
-
 VOID ReadFromMemory(HANDLE Process, DWORD64 Base, DWORD64 Size, PVOID Buffer)
 {
 	DWORD64 pageBase = ALIGN_PAGE_DOWN(Base);
@@ -149,6 +121,11 @@ int main()
 {
 	// Find memory location where patch will be applied/reverted:
 	DWORD processId = FindProcessId(TARGET_PROCESS_NAME);
+	if (processId == 0) {
+		printf("Process \"%s\" is not running. No changes were made.", TARGET_PROCESS_NAME);
+		return 0;
+	}
+
 	HANDLE process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, processId);
 	DWORD64 moduleBase = FindModuleBase(processId, MODULE_NAME);
 	DWORD64 targetLoc = moduleBase + PATCH_LOC;
@@ -174,4 +151,5 @@ int main()
 		WriteIntoMemory(process,targetLoc, PATCH_LEN, patchBytes);
 		printf("Patch applied.");
 	}
+	CloseHandle(process);
 }
