@@ -4,38 +4,12 @@
 // If you don't have the gcc C compiler, you can get it from
 // https://winlibs.com/
 
-#define TARGET_PROCESS_NAME "okami.exe"
-#define MODULE_NAME "main.dll"
-
-// The offset from the module where the patch bytes will be written to:
-#define PATCH_LOC 0x4494BA
-#define PATCH_LEN 6
-
-// Normally, the game checks a flag located at main.dll+B6B2B9 bit 7 (most
-// significant). If the bit is 1, it plays the brush music while in brush mode.
-// This is normally set when entering brush mode, along with several other
-// nearby flags associated with other effects. By making the game load a byte of
-// all zeroes instead of reading the byte where the flag is, it always plays the
-// normal area background music.
-//
-// One minor flaw is that this instruction change doesn't just disable the brush
-// music; if you are standing in front of a save mirror and then brush, it goes
-// from the save mirror music to the area music. If you unbrush, it goes back to
-// the save mirror music.
-#define ORIG_BYTES \
-/* mov eax,[main.dll+B6B2B8] */{0x8B, 0x05, 0xF8, 0x1D, 0x72, 0x00}
-#define PATCH_BYTES \
-/* mov eax,00000000 */         {0xB8, 0x00, 0x00, 0x00, 0x00, \
-/* nop */                       0x90};
-
 #include <stdio.h>
-#include <string.h>
 #include <windows.h>
 #include <tlhelp32.h>
 
 #define ALIGN_PAGE_DOWN(VALUE) (((DWORD64)VALUE) & ~((0x1000ULL) - 1))
 #define ALIGN_PAGE_UP(VALUE) ((((DWORD64)VALUE) + ((0x1000ULL) - 1)) & ~((0x1000ULL) - 1))
-
 
 DWORD FindProcessId(LPCSTR ProcessName)
 {
@@ -117,39 +91,86 @@ VOID WriteIntoMemory(HANDLE Process, DWORD64 Base, DWORD64 Size, PVOID Buffer)
 	}
 }
 
-int main()
-{
+boolean TogglePatch(
+	const char* description,
+	const HANDLE process, const DWORD64 moduleBase,
+	const DWORD64 patchLoc, const size_t patchLen,
+	char* origBytes, char* patchBytes
+) {
+	DWORD64 targetLoc = moduleBase + patchLoc;
+
+	char* currBytes = malloc(patchLen);
+	// Check if patch is already applied:
+	ReadFromMemory(process, targetLoc, patchLen, currBytes);
+	boolean isPatchAlreadyApplied = TRUE;
+	for (size_t i = 0; i < patchLen; ++i) {
+		if (patchBytes[i] != currBytes[i]) {
+			isPatchAlreadyApplied = FALSE;
+			// break;
+		}
+	}
+
+
+	if (isPatchAlreadyApplied) {
+		WriteIntoMemory(process,targetLoc, patchLen, origBytes);
+		printf("\"%s\" patch reverted to original game bytes.\n", description);
+	} else {
+		// Check if original bytes are correct:
+		for (size_t i = 0; i < patchLen; ++i) {
+			if (origBytes[i] != currBytes[i]) {
+				printf("ERROR: \"%s\" failed because original bytes did not match.\n", description);
+				free(currBytes);
+				return FALSE;
+			}
+		}
+		WriteIntoMemory(process,targetLoc, patchLen, patchBytes);
+		printf("\"%s\" patch applied.\n", description);
+	}
+	free(currBytes);
+	return !isPatchAlreadyApplied;
+}
+
+int main(){
 	// Find memory location where patch will be applied/reverted:
-	DWORD processId = FindProcessId(TARGET_PROCESS_NAME);
+	DWORD processId = FindProcessId("okami.exe");
 	if (processId == 0) {
-		printf("Process \"%s\" is not running. No changes were made.", TARGET_PROCESS_NAME);
+		printf("Process \"%s\" is not running. No changes were made.", "okami.exe");
 		return 0;
 	}
 
 	HANDLE process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, processId);
-	DWORD64 moduleBase = FindModuleBase(processId, MODULE_NAME);
-	DWORD64 targetLoc = moduleBase + PATCH_LOC;
+	DWORD64 moduleBase = FindModuleBase(processId, "main.dll");
 
-	byte origBytes[PATCH_LEN] = ORIG_BYTES;
-	byte patchBytes[PATCH_LEN] = PATCH_BYTES;
-	byte currBytes[PATCH_LEN];
+	// Normally, the game checks a flag located at main.dll+B6B2B9 bit 7 (most
+	// significant). If the bit is 1, it plays the brush music while in brush mode.
+	// This is normally set when entering brush mode, along with several other
+	// nearby flags associated with other effects. By making the game load a byte of
+	// all zeroes instead of reading the byte where the flag is, it always plays the
+	// normal area background music.
+	//
+	// One minor flaw is that this instruction change doesn't just disable the brush
+	// music; if you are standing in front of a save mirror and then brush, it goes
+	// from the save mirror music to the area music. If you unbrush, it goes back to
+	// the save mirror music.
+	TogglePatch(
+		"Disable Celestial Brush Music", process, moduleBase, 0x4494BA, 6,
+		// Original:
+		/* mov eax,[main.dll+B6B2B8] */"\x8B\x05\xF8\x1D\x72\x00",
+		//Patch:
+		/* mov eax,00000000 */         "\xB8\x00\x00\x00\x00"\
+		/* nop */                      "\x90"
+	);
 
-	// Check if patch is already applied:
-	ReadFromMemory(process, targetLoc, PATCH_LEN, currBytes);
-	boolean isPatchApplied = TRUE;
-	for (size_t i = 0; i < PATCH_LEN; ++i) {
-		if (patchBytes[i] != currBytes[i]) {
-			isPatchApplied = FALSE;
-			break;
-		}
-	}
-
-	if (isPatchApplied) {
-		WriteIntoMemory(process,targetLoc, PATCH_LEN, origBytes);
-		printf("Patch reverted to original game bytes.");
-	} else {
-		WriteIntoMemory(process,targetLoc, PATCH_LEN, patchBytes);
-		printf("Patch applied.");
-	}
+	// The above patch by itself works 90% of the time, but in Ryo and North
+	// Ryo, it just makes the music go silent when opening the brush. To fix it,
+	// we can nop out this function call which I believe is associated with
+	// setting up the fade-out of the Ryo music to silence.
+	TogglePatch(
+		"Fix Ryo music", process, moduleBase, 0x446C8C, 5,
+		// Original:
+		/* call main.dll+4487E0 */"\xE8\x4F\x1B\x00\x00",
+		//Patch:
+		/* nop (5 bytes) */       "\x0F\x1F\x44\x00\x01"
+	);
 	CloseHandle(process);
 }
